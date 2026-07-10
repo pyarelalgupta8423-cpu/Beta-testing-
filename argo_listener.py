@@ -6,7 +6,7 @@ from database import get_collection
 logger=logging.getLogger(__name__)
 REPORT_RE=re.compile(r"You invited\s+(\d{5,}\*+)\s+to join Argo",re.IGNORECASE)
 async def run_argo_listener():
-    api_id=int(os.getenv("TELEGRAM_API_ID","0") or 0); api_hash=os.getenv("TELEGRAM_API_HASH",""); session=os.getenv("TELEGRAM_SESSION",""); username=os.getenv("ARGO_BOT_USERNAME","ArgoTelegrambot").lstrip("@")
+    api_id=int(os.getenv("TELEGRAM_API_ID","0") or 0); api_hash=os.getenv("TELEGRAM_API_HASH",""); session=os.getenv("TELEGRAM_SESSION",""); username=os.getenv("ARGO_BOT_USERNAME","argox").lstrip("@")
     if not api_id or not api_hash or not session: logger.warning("Argo listener disabled: env missing"); return
     client=TelegramClient(StringSession(session),api_id,api_hash); await client.connect()
     if not await client.is_user_authorized(): logger.error("Argo session unauthorized"); await client.disconnect(); return
