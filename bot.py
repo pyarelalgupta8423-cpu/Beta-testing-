@@ -299,91 +299,19 @@ async def handle_force_join_complete(update, context):
     if links:
         sc = get_screen("external_tasks"); pm = get_parse_mode(sc)
         kb = [[InlineKeyboardButton(f"🔗 {l['name']}", url=l['url'])] for l in links if is_valid_url(l.get("url",""))]
-        kb.append([InlineKeyboardButton("✅ ᴅᴏɴᴇ", callback_data="ext_tasks_complete")])
+        kb.append([InlineKeyboardButton("🔍 ᴠᴇʀɪꜰʏ ᴀʟʟ", callback_data="ext_tasks_complete")])
         await safe_edit(q, sc["text"], pm, InlineKeyboardMarkup(kb))
     else: await complete_verification(update, context, uid)
 
 async def handle_external_tasks_complete(update, context):
-    q = update.callback_query; uid = q.from_user.id
-    if not await ensure_force_join_verified(uid, context): await safe_answer(q, "❌ ᴊᴏɪɴ!"); return
-    links = list(get_collection("external_links").find({"active": True}))
-    required = [l for l in links if l.get("verification_type", "none") != "none"]
-    verified = set(get_user(uid).get("verified_external_links", []))
-    missing = [l for l in required if str(l["_id"]) not in verified]
-    if missing:
-        await show_external_verification_menu(q, uid)
-        return
+    q=update.callback_query; uid=q.from_user.id
+    if not await ensure_force_join_verified(uid, context): await safe_answer(q,"❌ ᴊᴏɪɴ!"); return
     await complete_verification(update, context, uid)
 
-async def show_external_verification_menu(q, uid):
-    verified = set(get_user(uid).get("verified_external_links", []))
-    links = list(get_collection("external_links").find({"active": True}))
-    kb = []
-    for link in links:
-        vtype = link.get("verification_type", "none")
-        if vtype == "none": continue
-        lid = str(link["_id"]); done = lid in verified
-        icon = "✅" if done else ("🤖" if vtype == "argo" else "📸")
-        kb.append([InlineKeyboardButton(f"{icon} {link.get('name','Task')}", callback_data="noop" if done else f"verify_ext_{lid}")])
-    kb.append([InlineKeyboardButton("✅ ᴄʜᴇᴄᴋ ᴀʟʟ", callback_data="ext_tasks_complete")])
-    await safe_edit(q, "🔍 *ᴠᴇʀɪꜰʏ ʀᴇǫᴜɪʀᴇᴅ ᴛᴀsᴋs*", ParseMode.MARKDOWN, InlineKeyboardMarkup(kb))
 
-async def verify_external_link(update, context):
-    q=update.callback_query; uid=q.from_user.id
-    oid=safe_object_id(q.data.replace("verify_ext_",""))
-    link=get_collection("external_links").find_one({"_id":oid,"active":True}) if oid else None
-    if not link: await safe_answer(q,"❌"); return
-    lid=str(link["_id"])
-    if lid in set(get_user(uid).get("verified_external_links",[])): await safe_answer(q,"✅"); return
-    vtype=link.get("verification_type","none")
-    if vtype=="argo":
-        opened=get_user(uid).get("external_link_opened_at",{}).get(lid)
-        if not opened: await safe_answer(q,"🤖 ᴏᴘᴇɴ ᴀʀɢᴏ ꜰɪʀsᴛ!"); return
-        now=datetime.utcnow()
-        reports=list(get_collection("external_reports").find({"used":False,"message_date":{"$gte":opened,"$lte":opened+timedelta(minutes=10)}}).sort("message_date",1).limit(20))
-        uid_text=str(uid)
-        matching=[r for r in reports if str(r.get("masked_user_id","")).split("*",1)[0] and uid_text.startswith(str(r.get("masked_user_id","")).split("*",1)[0])]
-        if len(matching)!=1: await safe_answer(q,"🔍 ᴀʀɢᴏ ʀᴇᴘᴏʀᴛ ɴᴏᴛ ꜰᴏᴜɴᴅ!"); return
-        claimed=get_collection("external_reports").find_one_and_update({"_id":matching[0]["_id"],"used":False},{"$set":{"used":True,"claimed_by":uid,"claimed_at":now,"external_link_id":lid}},return_document=ReturnDocument.AFTER)
-        if not claimed: await safe_answer(q,"⏳ ᴛʀʏ ᴀɢᴀɪɴ!"); return
-        get_collection("users").update_one({"user_id":uid},{"$addToSet":{"verified_external_links":lid}})
-        await safe_answer(q,"✅ ᴀʀɢᴏ ᴠᴇʀɪꜰɪᴇᴅ!"); await show_external_verification_menu(q,uid); return
-    if vtype=="screenshot":
-        context.user_data["awaiting_external_screenshot"]=lid
-        await safe_edit(q,f"📸 Send screenshot for: {link.get('name','Task')}\n\nAdmin will review it.",parse_mode=None); return
-    get_collection("users").update_one({"user_id":uid},{"$addToSet":{"verified_external_links":lid}})
-    await show_external_verification_menu(q,uid)
 
-async def handle_external_screenshot(update, context):
-    uid=update.effective_user.id; lid=context.user_data.get("awaiting_external_screenshot")
-    if not lid or not update.message or not update.message.photo: return
-    oid=safe_object_id(lid); link=get_collection("external_links").find_one({"_id":oid,"active":True}) if oid else None
-    if not link: context.user_data.pop("awaiting_external_screenshot",None); return
-    if get_collection("external_verification_requests").find_one({"user_id":uid,"external_link_id":lid,"status":"pending"}):
-        await update.message.reply_text("⏳ Screenshot already pending review."); context.user_data.pop("awaiting_external_screenshot",None); return
-    result=get_collection("external_verification_requests").insert_one({"user_id":uid,"external_link_id":lid,"task_name":link.get("name","Task"),"file_id":update.message.photo[-1].file_id,"status":"pending","created_at":datetime.utcnow()})
-    rid=str(result.inserted_id)
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("✅ APPROVE",callback_data=f"admin_extapprove_{rid}"),InlineKeyboardButton("❌ REJECT",callback_data=f"admin_extreject_{rid}")]])
-    for admin_id in ADMIN_IDS:
-        try: await context.bot.send_photo(admin_id,update.message.photo[-1].file_id,caption=f"📸 External Task Verification\n\n👤 User: {uid}\n📋 Task: {link.get('name','Task')}",reply_markup=kb)
-        except Exception as e: logger.error("Screenshot review send failed: %s",e)
-    context.user_data.pop("awaiting_external_screenshot",None)
-    await update.message.reply_text("✅ Screenshot submitted. Wait for admin review.")
 
-async def handle_external_admin_review(update, context):
-    q=update.callback_query
-    if q.from_user.id not in ADMIN_IDS: await safe_answer(q,"❌"); return
-    approve=q.data.startswith("admin_extapprove_")
-    rid=q.data.replace("admin_extapprove_","").replace("admin_extreject_","")
-    oid=safe_object_id(rid)
-    request=get_collection("external_verification_requests").find_one_and_update({"_id":oid,"status":"pending"},{"$set":{"status":"approved" if approve else "rejected","reviewed_at":datetime.utcnow(),"reviewed_by":q.from_user.id}},return_document=ReturnDocument.BEFORE) if oid else None
-    if not request: await safe_answer(q,"⚠️ Already processed!"); return
-    if approve: get_collection("users").update_one({"user_id":request["user_id"]},{"$addToSet":{"verified_external_links":request["external_link_id"]}})
-    label="✅ APPROVED" if approve else "❌ REJECTED"
-    await q.edit_message_caption(caption=(q.message.caption or "")+f"\n\n{label}",reply_markup=None)
-    try: await context.bot.send_message(request["user_id"],f"{label}\n📋 {request.get('task_name','Task')}")
-    except: pass
-    await safe_answer(q,label)
+
 
 async def complete_verification(update, context, uid):
     q = update.callback_query
@@ -394,6 +322,22 @@ async def complete_verification(update, context, uid):
     if u.get("pending_referrer"): await handle_referral_points(uid, u["pending_referrer"], context)
     fresh_u = get_user(uid); sc = get_screen("verification_done"); pm = get_parse_mode(sc)
     await safe_edit(q, sc["text"], pm, build_keyboard(get_buttons("main_menu"), build_text_context(q.from_user, fresh_u, pm), build_url_context(q.from_user, fresh_u), pm))
+
+def build_premium_force_join(user, channels):
+    first_name = escape_markdown(user.first_name or "User")
+    text = (
+        f"👋 *Hello➳ {first_name}*\n\n"
+        "➳ *YOU NEED TO JOIN THE FOLLOWING*\n"
+        "*CHANNELS BEFORE CONTINUING☆*\n\n"
+        "✨ Join every channel below, then tap *Continue➳✨*."
+    )
+    kb = []
+    for c in channels:
+        title = c.get("channel_name") or "Join Channel"
+        if len(title) > 30: title = title[:27] + "..."
+        kb.append([InlineKeyboardButton(f"➳ {title} ✨", url=c["invite_link"])])
+    kb.append([InlineKeyboardButton("Continue➳✨", callback_data="check_join")])
+    return text, InlineKeyboardMarkup(kb)
 
 # ============ CALLBACK ROUTER ============
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -416,28 +360,27 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif d == "check_join":
         not_joined, check_failed = await check_force_join(uid, context)
         if check_failed: await safe_answer(q, "⚠️ Verification temporarily unavailable!")
-        elif not_joined: await safe_answer(q, "❌")
-        else: await safe_answer(q, "✅"); await handle_force_join_complete(update, context)
+        elif not_joined:
+            await safe_answer(q, "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟs!")
+            text, markup = build_premium_force_join(q.from_user, not_joined)
+            await safe_edit(q, text, ParseMode.MARKDOWN, markup)
+        else: await safe_answer(q, "✅ ᴠᴇʀɪꜰɪᴇᴅ!"); await handle_force_join_complete(update, context)
     elif d == "start_verify":
         u = sync_verification_version(uid); not_joined, check_failed = await check_force_join(uid, context)
         if check_failed: await safe_answer(q, "⚠️ Verification temporarily unavailable!")
         elif not_joined:
-            sc = get_screen("force_join"); pm = get_parse_mode(sc)
-            kb = [[InlineKeyboardButton(f"📢 {c['channel_name']}", url=c['invite_link'])] for c in not_joined]
-            kb.append([InlineKeyboardButton("✅ ᴄʜᴇᴄᴋ", callback_data="check_join")])
-            await safe_edit(q, sc["text"], pm, InlineKeyboardMarkup(kb))
+            text, markup = build_premium_force_join(q.from_user, not_joined)
+            await safe_edit(q, text, ParseMode.MARKDOWN, markup)
         else: await handle_force_join_complete(update, context)
     elif d == "ext_tasks_complete": await handle_external_tasks_complete(update, context)
-    elif d.startswith("open_ext_"):
-        oid=safe_object_id(d.replace("open_ext_","")); link=get_collection("external_links").find_one({"_id":oid,"active":True}) if oid else None
-        if not link or not is_valid_url(link.get("url","")): await safe_answer(q,"❌"); return
-        lid=str(link["_id"]); get_collection("users").update_one({"user_id":uid},{"$set":{f"external_link_opened_at.{lid}":datetime.utcnow()}})
-        await safe_answer(q,"🔗 ᴏᴘᴇɴ ʟɪɴᴋ"); await q.message.reply_text(link["url"])
-    elif d.startswith("verify_ext_"): await verify_external_link(update, context)
-    elif d.startswith("admin_extapprove_") or d.startswith("admin_extreject_"): await handle_external_admin_review(update, context)
-    elif d == "noop": await safe_answer(q,"✅ ᴀʟʀᴇᴀᴅʏ ᴠᴇʀɪꜰɪᴇᴅ!")
     elif d.startswith("task_do_"): await handle_specific_task(update, context, d.replace("task_do_", ""))
+    elif d.startswith("task_open_"):
+        tid=d.replace("task_open_",""); t=get_task_by_id(tid)
+        if not t or not is_valid_url(t.get("url","")): await safe_answer(q,"❌"); return
+        get_collection("users").update_one({"user_id":uid},{"$set":{f"task_opened_at.{tid}":datetime.utcnow()}})
+        await safe_answer(q,"🔗 Link ready!"); await q.message.reply_text(f"🔗 {t.get('name','Task')}\n{t['url']}\n\nComplete task, then verify.")
     elif d.startswith("task_verify_"): await verify_task_completion(update, context, d.replace("task_verify_", ""))
+    elif d.startswith("taskshot_approve_") or d.startswith("taskshot_reject_"): await review_task_screenshot(update, context)
     elif d.startswith("withdraw_service_"): await handle_withdraw_service(update, context, d.replace("withdraw_service_", ""))
     elif d.startswith("withdraw_input_"): await handle_withdraw_input_prompt(update, context, d.replace("withdraw_input_", ""))
     elif d.startswith("payout_approve_"): await payout_approve(update, context, d.replace("payout_approve_", ""))
@@ -548,7 +491,7 @@ async def payout_approve(update, context, serial_no):
     if not r: await safe_answer(q, "⚠️ Already processed!"); return
     sc = get_screen("withdraw_approved_user"); pm = get_parse_mode(sc)
     await safe_send(context.bot, r["user_id"], render_text(sc["text"], {"token": str(r['serial_no']), "points": str(r['points'])}), pm)
-    await q.edit_message_text((q.message.text or "") + "\n\n✅ APPROVED", parse_mode=q.message.parse_mode, reply_markup=None)
+    await q.edit_message_text((q.message.text or "") + "\n\n✅ APPROVED", reply_markup=None)
     await safe_answer(q, "✅ Approved!")
 
 async def payout_reject(update, context, serial_no):
@@ -560,7 +503,7 @@ async def payout_reject(update, context, serial_no):
     if not r: await safe_answer(q, "⚠️ Already processed!"); return
     sc = get_screen("withdraw_rejected_user"); pm = get_parse_mode(sc)
     await safe_send(context.bot, r["user_id"], render_text(sc["text"], {"token": str(r['serial_no']), "points": str(r['points'])}), pm)
-    await q.edit_message_text((q.message.text or "") + "\n\n❌ REJECTED", parse_mode=q.message.parse_mode, reply_markup=None)
+    await q.edit_message_text((q.message.text or "") + "\n\n❌ REJECTED", reply_markup=None)
     await safe_answer(q, "❌ Rejected!")
 
 def get_payout_channel():
@@ -590,7 +533,8 @@ async def earn_points_handler(update, context):
 async def tasks_menu_handler(update, context):
     q = update.callback_query
     if not await ensure_user_verified(q.from_user.id, context): await safe_answer(q, "❌"); return
-    tasks = list(get_collection("tasks").find({"active": True}))
+    completed = set(get_user(q.from_user.id).get("completed_tasks", []))
+    tasks = [t for t in get_collection("tasks").find({"active": True}) if t["_id"] not in completed]
     if not tasks:
         sc = get_screen("no_tasks"); await safe_edit(q, sc["text"], get_parse_mode(sc), InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="main_menu")]])); return
     kb = [[InlineKeyboardButton(f"📌 {t['name']} (+{t['points']})", callback_data=f"task_do_{t['_id']}")] for t in tasks]
@@ -611,23 +555,73 @@ async def handle_specific_task(update, context, tid):
     else:
         if not is_valid_url(t.get("url","")): await safe_answer(q, "❌ Task configuration error!"); return
         a = u.get("task_attempts",{}).get(tid,0); sc = get_screen("task_detail"); pm = get_parse_mode(sc)
-        await safe_edit(q, render_text(sc["text"], {"task_name": escape_for_mode(t['name'], pm), "task_points": str(t['points']), "attempts": str(a)}), pm, InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ᴏᴘᴇɴ", url=t['url'])], [InlineKeyboardButton("🎯 ᴄʟᴀɪᴍ", callback_data=f"task_verify_{tid}")], [InlineKeyboardButton("🔙", callback_data="main_tasks")]]))
+        vtype=t.get("type","none")
+        label="🤖 ᴠᴇʀɪꜰʏ ᴀʀɢᴏ" if vtype=="argo" else ("📸 sᴇɴᴅ sᴄʀᴇᴇɴsʜᴏᴛ" if vtype=="screenshot" else "🎯 ᴄʟᴀɪᴍ")
+        await safe_edit(q, render_text(sc["text"], {"task_name": escape_for_mode(t['name'], pm), "task_points": str(t['points']), "attempts": str(a)}), pm, InlineKeyboardMarkup([[InlineKeyboardButton("🔗 ᴏᴘᴇɴ", callback_data=f"task_open_{tid}")], [InlineKeyboardButton(label, callback_data=f"task_verify_{tid}")], [InlineKeyboardButton("🔙", callback_data="main_tasks")]]))
+
+async def credit_task_reward(uid, task, tid):
+    oid=safe_object_id(tid)
+    if not oid: return False
+    r=get_collection("users").update_one({"user_id":uid,"completed_tasks":{"$ne":oid}},{"$inc":{"points":task["points"]},"$addToSet":{"completed_tasks":oid}})
+    return r.modified_count==1
 
 async def verify_task_completion(update, context, tid):
-    q = update.callback_query; oid = safe_object_id(tid)
-    if not oid: await safe_answer(q, "❌"); return
-    t = get_task_by_id(tid)
-    if not t: await safe_answer(q, "❌"); return
-    if t.get("points", 0) <= 0: await safe_answer(q, "❌ Task error!"); return
-    if not await ensure_user_verified(q.from_user.id, context): await safe_answer(q, "❌"); return
-    uid = q.from_user.id; u = get_user(uid); a = u.get("task_attempts",{}).get(tid,0) + 1
-    if a < 2: get_collection("users").update_one({"user_id": uid}, {"$set": {f"task_attempts.{tid}": a}}); await safe_answer(q, f"⚠️ {2-a}!"); return
-    # Task completion uses task_key if available, otherwise falls back to task _id
-    task_key = t.get("task_key", tid)
-    r = get_collection("users").update_one({"user_id": uid, "completed_tasks": {"$ne": oid}}, {"$inc": {"points": t["points"]}, "$addToSet": {"completed_tasks": oid}, "$set": {f"task_attempts.{tid}": a}})
-    if r.modified_count == 0: await safe_answer(q, "✅"); return
-    await safe_answer(q, f"✅ +{t['points']}!"); await tasks_menu_handler(update, context)
+    q=update.callback_query; uid=q.from_user.id; t=get_task_by_id(tid)
+    if not t or t.get("points",0)<=0: await safe_answer(q,"❌ Task error!"); return
+    if not await ensure_user_verified(uid,context): await safe_answer(q,"❌"); return
+    oid=safe_object_id(tid)
+    if oid in get_user(uid).get("completed_tasks",[]): await safe_answer(q,"✅ Already completed!"); return
+    vtype=t.get("type","none")
+    if vtype=="argo":
+        opened=get_user(uid).get("task_opened_at",{}).get(tid)
+        if not opened: await safe_answer(q,"🤖 Open Argo task first!"); return
+        now=datetime.utcnow(); reports=list(get_collection("external_reports").find({"used":False,"message_date":{"$gte":opened,"$lte":opened+timedelta(minutes=10)}}).sort("message_date",1).limit(20))
+        matches=[]
+        for r in reports:
+            prefix=str(r.get("masked_user_id","")).split("*",1)[0]
+            if prefix and str(uid).startswith(prefix): matches.append(r)
+        if len(matches)!=1: await safe_answer(q,"🔍 Argo report not found yet!"); return
+        claimed=get_collection("external_reports").find_one_and_update({"_id":matches[0]["_id"],"used":False},{"$set":{"used":True,"claimed_by":uid,"claimed_at":now,"task_id":tid}},return_document=ReturnDocument.AFTER)
+        if not claimed: await safe_answer(q,"⏳ Try again!"); return
+        if not await credit_task_reward(uid,t,tid): await safe_answer(q,"✅ Already completed!"); return
+        await safe_answer(q,f"✅ +{t['points']}!"); await tasks_menu_handler(update,context); return
+    if vtype=="screenshot":
+        if get_collection("task_verification_requests").find_one({"user_id":uid,"task_id":tid,"status":"pending"}): await safe_answer(q,"⏳ Screenshot pending!"); return
+        context.user_data["awaiting_task_screenshot"]=tid
+        await safe_edit(q,f"📸 Send screenshot for: {t.get('name','Task')}\n\nAdmin will review it.",parse_mode=None); return
+    if vtype=="add_to_group": await safe_answer(q,"ℹ️ Verified automatically after group add."); return
+    if not await credit_task_reward(uid,t,tid): await safe_answer(q,"✅ Already completed!"); return
+    await safe_answer(q,f"✅ +{t['points']}!"); await tasks_menu_handler(update,context)
 
+async def handle_task_screenshot(update, context):
+    uid=update.effective_user.id; tid=context.user_data.get("awaiting_task_screenshot")
+    if not tid or not update.message or not update.message.photo: return
+    t=get_task_by_id(tid)
+    if not t or t.get("type")!="screenshot": context.user_data.pop("awaiting_task_screenshot",None); return
+    if get_collection("task_verification_requests").find_one({"user_id":uid,"task_id":tid,"status":"pending"}): await update.message.reply_text("⏳ Already pending."); context.user_data.pop("awaiting_task_screenshot",None); return
+    x=get_collection("task_verification_requests").insert_one({"user_id":uid,"task_id":tid,"task_name":t["name"],"points":t["points"],"file_id":update.message.photo[-1].file_id,"status":"pending","created_at":datetime.utcnow()})
+    rid=str(x.inserted_id); kb=InlineKeyboardMarkup([[InlineKeyboardButton("✅ APPROVE",callback_data=f"taskshot_approve_{rid}"),InlineKeyboardButton("❌ REJECT",callback_data=f"taskshot_reject_{rid}")]])
+    for aid in ADMIN_IDS:
+        try: await context.bot.send_photo(aid,update.message.photo[-1].file_id,caption=f"📸 Task Verification\n\n👤 User: {uid}\n📋 Task: {t['name']}\n💰 Points: {t['points']}",reply_markup=kb)
+        except Exception as e: logger.error("Screenshot send failed: %s",e)
+    context.user_data.pop("awaiting_task_screenshot",None); await update.message.reply_text("✅ Submitted for review.")
+
+async def review_task_screenshot(update, context):
+    q=update.callback_query
+    if q.from_user.id not in ADMIN_IDS: await safe_answer(q,"❌"); return
+    approve=q.data.startswith("taskshot_approve_"); rid=q.data.replace("taskshot_approve_","").replace("taskshot_reject_",""); roid=safe_object_id(rid)
+    request=get_collection("task_verification_requests").find_one_and_update({"_id":roid,"status":"pending"},{"$set":{"status":"approved" if approve else "rejected","reviewed_at":datetime.utcnow(),"reviewed_by":q.from_user.id}},return_document=ReturnDocument.BEFORE) if roid else None
+    if not request: await safe_answer(q,"⚠️ Already processed!"); return
+    label="❌ REJECTED"
+    if approve:
+        task=get_task_by_id(request["task_id"])
+        label=f"✅ APPROVED • +{task['points']} pts" if task and await credit_task_reward(request["user_id"],task,request["task_id"]) else "✅ APPROVED • Already credited"
+    await q.edit_message_caption(caption=(q.message.caption or "")+f"\n\n{label}",reply_markup=None)
+    try: await context.bot.send_message(request["user_id"],f"{label}\n📋 {request.get('task_name','Task')}")
+    except Exception: pass
+    await safe_answer(q,label)
+
+# ============ KEYBOARD MESSAGE HANDLER ============
 # ============ KEYBOARD MESSAGE HANDLER ============
 async def handle_keyboard_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text; uid = update.effective_user.id
@@ -953,11 +947,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if check_failed:
         await safe_send(context.bot, uid, "⚠️ Verification temporarily unavailable!", reply_markup=VERIFY_KEYBOARD); return
     if not_joined:
-        sc=get_screen("welcome"); pm=get_parse_mode(sc)
-        kb=[[InlineKeyboardButton(f"📢 {c['channel_name']}", url=c['invite_link'])] for c in not_joined]
-        kb.append([InlineKeyboardButton("✅ ᴄʜᴇᴄᴋ", callback_data="check_join")])
-        await safe_send(context.bot, uid, render_text(sc["text"],build_text_context(user,u,pm)), pm, InlineKeyboardMarkup(kb))
-        await safe_send(context.bot, uid, "👇", reply_markup=VERIFY_KEYBOARD); return
+        text, markup = build_premium_force_join(user, not_joined)
+        await safe_send(context.bot, uid, text, ParseMode.MARKDOWN, markup)
+        return
     if u.get("external_tasks_completed"):
         get_collection("users").update_one({"user_id":uid},{"$set":{"force_join_completed":True}})
         fresh_u=get_user(uid); sc=get_screen("welcome_back"); pm=get_parse_mode(sc)
@@ -967,8 +959,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         links=list(get_collection("external_links").find({"active":True}))
         if links:
             sc=get_screen("external_tasks"); pm=get_parse_mode(sc)
-            kb=[[InlineKeyboardButton(f"🔗 {l['name']}", callback_data=f"open_ext_{l['_id']}" if l.get("verification_type","none")!="none" else None, url=l['url'] if l.get("verification_type","none")=="none" else None)] for l in links if is_valid_url(l.get("url",""))]
-            kb.append([InlineKeyboardButton("✅ ᴅᴏɴᴇ", callback_data="ext_tasks_complete")])
+            kb=[[InlineKeyboardButton(f"🔗 {l['name']}", url=l['url'])] for l in links if is_valid_url(l.get("url",""))]
+            kb.append([InlineKeyboardButton("🔍 ᴠᴇʀɪꜰʏ ᴀʟʟ", callback_data="ext_tasks_complete")])
             await safe_send(context.bot, uid, render_text(sc["text"],build_text_context(user,u,pm)), pm, InlineKeyboardMarkup(kb))
         else:
             get_collection("users").update_one({"user_id":uid},{"$set":{"external_tasks_completed":True,"verification_version":get_verification_version()},"$unset":{"verification.external_required":"","verification.external_attempts":""}})
@@ -1029,9 +1021,12 @@ async def add_task_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         url = p[3].strip() if len(p) > 3 else ""
         pts = int(pts_str)
         if pts <= 0: await update.message.reply_text("❌ Task points must be > 0!"); return
+        allowed_types = ("argo", "screenshot", "none", "add_to_group")
+        task_type = task_type.lower()
+        if task_type not in allowed_types: await update.message.reply_text("❌ Type: argo | screenshot | none | add_to_group"); return
         if task_type != "add_to_group" and not is_valid_url(url): await update.message.reply_text("❌ Invalid task URL!"); return
         get_collection("tasks").insert_one({"name": name, "points": pts, "type": task_type, "url": url, "active": True, "created_date": datetime.now(), "task_key": f"task_{datetime.now().timestamp()}"})
-        await update.message.reply_text("✅")
+        await update.message.reply_text(f"✅ Task added\n📋 {name}\n💰 {pts} pts\n🔍 {task_type}")
     except Exception as e: logger.error("Add task failed: %s", e); await update.message.reply_text("❌ Format: /addtask Name | Points | type | url")
 
 async def set_points_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1119,7 +1114,7 @@ def main():
 )
     for cmd,func in [("start",start),("admin",admin_command),("broadcast",broadcast_command),("broadcastgroups",broadcast_groups_command),("addchannel",add_channel_command),("addlink",add_link_command),("addtask",add_task_command),("setpoints",set_points_command),("cancel",cancel_command)]:
         app.add_handler(CommandHandler(cmd,func))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_external_screenshot))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_task_screenshot))
     app.add_handler(MessageHandler(filters.TEXT & filters.User(user_id=ADMIN_IDS) & ~filters.COMMAND, handle_admin_messages))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keyboard_message))
     app.add_handler(ChatMemberHandler(handle_bot_added_to_group, ChatMemberHandler.MY_CHAT_MEMBER))
